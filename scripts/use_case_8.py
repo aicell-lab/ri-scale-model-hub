@@ -23,9 +23,28 @@ def dataset_from_model(model: dict[str, Any]) -> dict[str, Any]:
     """Extract dataset information from a model dictionary."""
     model_manifest = model.get("manifest", {})
 
+    if "test_tensor" in model_manifest["inputs"][0]:
+        file_paths = [model_manifest["inputs"][0]["test_tensor"]["source"]]
+    elif "test_inputs" in model_manifest:
+        file_paths = [model_manifest["test_inputs"][0]]
+
     return {
         "type": "dataset",
         "name": f"Dataset for {model_manifest.get('name', 'unknown model')}",
+        "tags": model_manifest.get("tags", []),
+        "description": f"Dataset of {model_manifest.get('description', '')}",
+        "files": file_paths,
+    }
+
+
+def summarize_model(model: dict[str, Any]) -> dict[str, Any]:
+    """Create a summary string for a model."""
+    model_manifest = model.get("manifest", {})
+
+    return {
+        "type": "model",
+        "id": model.get("id", "unknown id"),
+        "name": model_manifest.get("name", "unknown model"),
         "tags": model_manifest.get("tags", []),
         "description": model_manifest.get("description", ""),
     }
@@ -57,20 +76,7 @@ def make_search_datasets(
         If you don't find any relevant results, try broadening your search or leaving
         the keywords empty to get all datasets.
 
-        Parameters
-        ----------
-        keywords: list[str] | None)
-            List of keywords to search for. If None,
-            returns all datasets.
-        items_per_page: int
-            Number of items to return per page. Default is 25.
-        page_num: int
-            Page number to return. Default is 1.
-
-        Returns
-        -------
-            list[dict[str, Any]]: List of matching datasets from the BioImage Archive.
-
+        Returns a list of matching datasets from the BioImage Archive.
         """
         page_offset = (page_num - 1) * items_per_page
 
@@ -115,20 +121,7 @@ def make_search_models(
         If you don't find any relevant results, try broadening your search or leaving
         the keywords empty to get all items.
 
-        Parameters
-        ----------
-        keywords: list[str] | None)
-            List of keywords to search for. If None,
-            returns all models.
-        items_per_page: int
-            Number of items to return per page. Default is 25.
-        page_num: int
-            Page number to return. Default is 1.
-
-        Returns
-        -------
-            list[dict[str, Any]]: List of matching models from the RI-SCALE Model Hub.
-
+        Returns a list of matching models from the RI-SCALE Model Hub.
         """
         page_offset = (page_num - 1) * items_per_page
 
@@ -142,37 +135,73 @@ def make_search_models(
             pagination=True,
         )
 
-        return am_response["items"]
+        return [summarize_model(model) for model in am_response["items"]]
 
     return search_models
 
 
 def make_run_model(
-    server: RemoteService,
+    artifact_manager: RemoteService,
+    model_runner: RemoteService,
 ) -> Callable[..., Coroutine[Any, Any, dict]]:
     """Create a function to run an RI-SCALE model on a dataset."""
 
     @schema_function
     async def run_model(
         model_id: str = Field(..., description="ID of the RI-SCALE model"),
-        dataset_id: str = Field(..., description="ID of the dataset"),
+        file_path: str = Field(
+            ...,
+            description="File path for input data file, e.g. 'test_input_0.npy'",
+        ),
     ) -> dict[str, Any]:
         """Run an RI-SCALE model on a dataset and return the results."""
-        model_runner_service = await server.get_service("bioimage-io/model-runner")
-        artifact_manager = await server.get_service(
-            "public/artifact-manager",
-        )
         dataset_file = await artifact_manager.get_file(
-            artifact_id=dataset_id,
-            file_path="data.csv",
+            artifact_id=model_id,
+            file_path=file_path,
         )
 
-        return await model_runner_service.infer(
+        output = await model_runner.infer(
             model_id=model_id,
-            input=dataset_file,
+            inputs=dataset_file,
         )
+
+        return {
+            "input": dataset_file,
+            "output": output,
+            "status": "success",
+        }
 
     return run_model
+
+
+async def test_workflow(
+    artifact_manager: RemoteService,
+    model_runner: RemoteService,
+) -> None:
+    search_models = make_search_models(artifact_manager)
+    search_datasets = make_search_datasets(artifact_manager)
+    run_model = make_run_model(artifact_manager, model_runner)
+
+    datasets = await search_datasets(keywords=["nuclei"], items_per_page=2, page_num=1)
+    dataset = datasets[0]
+    print("\n=========Selected dataset========\n")
+    print(dataset)
+
+    models = await search_models(keywords=["nuclei"], items_per_page=2, page_num=1)
+    model = models[0]
+    print("\n=========Selected model=========\n")
+    print(model)
+
+    print("\n=========RUNNING...=========\n")
+    code_run = """await model_runner.infer(
+    model_id="affable-shark",
+    inputs=file("test_input_0.npy"),
+)"""
+    print(code_run)
+
+    print("\n=========Model run result========\n")
+    result = await run_model(model_id=model["id"], file_path=dataset["files"][0])
+    print(result)
 
 
 async def register_service(
@@ -180,13 +209,12 @@ async def register_service(
     service_id: str = "bioimage_runner",
 ) -> None:
     """Register the RI-SCALE Model Hub runner service on the server."""
-    artifact_manager: RemoteService = await server.get_service(
-        "public/artifact-manager",
-    )
+    artifact_manager = await server.get_service("public/artifact-manager")
+    model_runner = await server.get_service("bioimage-io/model-runner")
 
     search_models = make_search_models(artifact_manager)
     search_datasets = make_search_datasets(artifact_manager)
-    run_model = make_run_model(server)
+    run_model = make_run_model(artifact_manager, model_runner)
 
     description = (
         "Service to search and run AI models from the RI-SCALE Model Hub."
@@ -194,7 +222,6 @@ async def register_service(
         " 1. search for datasets using `search_datasets()`,"
         " 2. then find a suitable model using `search_models()`,"
         " 3. then run the model using `run_model()`."
-        " NOTE: do not provide a dataset as input to `run_model()`."
     )
 
     await server.register_service(
