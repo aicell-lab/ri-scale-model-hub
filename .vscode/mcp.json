@@ -1,0 +1,9 @@
+{
+	"servers": {
+		"BioImage Runner": {
+			"url": "https://hypha.aicell.io/ri-scale/mcp/bioimage_runner/mcp",
+			"type": "http"
+		}
+	},
+	"inputs": []
+}

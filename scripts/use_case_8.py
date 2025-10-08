@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger.setLevel(logging.INFO)
 
 
 def make_search_bioimage(
@@ -33,16 +33,10 @@ def make_search_bioimage(
         keywords: list[str] | None = keywords_field,
     ) -> list[dict[str, Any]]:
         """Search for AI models, datasets, and applications in the BioImage.IO archive."""
-        items_per_page = 1000
-
         return await artifact_manager.list(
             parent_id="bioimage-io/bioimage.io",
             keywords=keywords,
             stage=False,
-            limit=items_per_page,
-            offset=0,
-            pagination=True,
-            _rkwargs=True,
         )
 
     return search_bioimage
