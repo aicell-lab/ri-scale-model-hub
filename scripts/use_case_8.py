@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from io import BytesIO
 from typing import TYPE_CHECKING, Any
 
+import httpx
+import numpy as np
 from hypha_rpc import connect_to_server, login
 from hypha_rpc.utils.schema import schema_function
 from pydantic import Field
@@ -19,21 +22,34 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def dataset_from_model(model: dict[str, Any]) -> dict[str, Any]:
+async def dataset_from_model(
+    model: dict[str, Any],
+    artifact_manager: RemoteService,
+) -> dict[str, Any]:
     """Extract dataset information from a model dictionary."""
     model_manifest = model.get("manifest", {})
 
-    if "test_tensor" in model_manifest["inputs"][0]:
+    if ("inputs" in model_manifest) and ("test_tensor" in model_manifest["inputs"][0]):
         file_paths = [model_manifest["inputs"][0]["test_tensor"]["source"]]
     elif "test_inputs" in model_manifest:
         file_paths = [model_manifest["test_inputs"][0]]
+    else:
+        file_paths = []
+
+    file_urls = [
+        await artifact_manager.get_file(
+            artifact_id=model.get("id"),
+            file_path=file_path,
+        )
+        for file_path in file_paths
+    ]
 
     return {
         "type": "dataset",
         "name": f"Dataset for {model_manifest.get('name', 'unknown model')}",
         "tags": model_manifest.get("tags", []),
         "description": f"Dataset of {model_manifest.get('description', '')}",
-        "files": file_paths,
+        "file_urls": file_urls,
     }
 
 
@@ -56,12 +72,22 @@ def make_search_datasets(
     """Create a function to search datasets in the Bioimage Archive."""
     keywords_field = Field(
         default=None,
-        description="Search keywords. Leave empty to get all datasets.",
+        description=(
+            "Fuzzy search keywords. Results match at least one (not necessarily all)"
+            " of the keywords. Leave empty to get all datasets."
+        ),
     )
 
     @schema_function
     async def search_datasets(
         keywords: list[str] | None = keywords_field,
+        mode: str = Field(
+            default="OR",
+            description=(
+                'Search mode: "OR" (default) returns models matching any of the'
+                ' keywords. "AND" returns models matching all of the keywords.'
+            ),
+        ),
         items_per_page: int = Field(
             default=25,
             description="Number of datasets to return per page.",
@@ -71,12 +97,13 @@ def make_search_datasets(
             description="Page number to return.",
         ),
     ) -> list[dict[str, Any]]:
-        """Search for datasets in the BioImage Archive.
+        """Fuzzy search for datasets in the BioImage Archive using keywords.
 
         If you don't find any relevant results, try broadening your search or leaving
         the keywords empty to get all datasets.
 
-        Returns a list of matching datasets from the BioImage Archive.
+        Returns a list of datasets from the BioImage Archive that match
+        any (mode: "OR") or all (mode: "AND") of the keywords, depending on mode.
         """
         page_offset = (page_num - 1) * items_per_page
 
@@ -84,13 +111,17 @@ def make_search_datasets(
             parent_id="bioimage-io/bioimage.io",
             keywords=keywords,
             stage=False,
+            mode=mode,
             filters={"type": "model"},
             limit=items_per_page,
             offset=page_offset,
             pagination=True,
         )
 
-        return [dataset_from_model(model) for model in am_response["items"]]
+        return [
+            await dataset_from_model(model, artifact_manager)
+            for model in am_response["items"]
+        ]
 
     return search_datasets
 
@@ -101,12 +132,19 @@ def make_search_models(
     """Create a function to search models in the RI-SCALE Model Hub."""
     keywords_field = Field(
         default=None,
-        description="Search keywords. Leave empty to get all items.",
+        description=("Fuzzy search keywords. Leave empty to get all models."),
     )
 
     @schema_function
     async def search_models(
         keywords: list[str] | None = keywords_field,
+        mode: str = Field(
+            default="OR",
+            description=(
+                'Search mode: "OR" (default) returns models matching any of the'
+                ' keywords. "AND" returns models matching all of the keywords.'
+            ),
+        ),
         items_per_page: int = Field(
             default=25,
             description="Number of items to return per page.",
@@ -116,12 +154,13 @@ def make_search_models(
             description="Page number to return.",
         ),
     ) -> list[dict[str, Any]]:
-        """Search for AI models in the RI-SCALE Model Hub.
+        """Fuzzy search for models in the RI-SCALE Model Hub using keywords.
 
         If you don't find any relevant results, try broadening your search or leaving
-        the keywords empty to get all items.
+        the keywords empty to get all models.
 
-        Returns a list of matching models from the RI-SCALE Model Hub.
+        Returns a list of models from the RI-SCALE Model Hub that match
+        any (mode: "OR") or all (mode: "AND") of the keywords, depending on mode.
         """
         page_offset = (page_num - 1) * items_per_page
 
@@ -129,6 +168,7 @@ def make_search_models(
             parent_id="bioimage-io/bioimage.io",
             keywords=keywords,
             stage=False,
+            mode=mode,
             filters={"type": "model"},
             limit=items_per_page,
             offset=page_offset,
@@ -141,27 +181,28 @@ def make_search_models(
 
 
 def make_run_model(
-    artifact_manager: RemoteService,
     model_runner: RemoteService,
 ) -> Callable[..., Coroutine[Any, Any, dict]]:
-    """Create a function to run an RI-SCALE model on a dataset."""
+    """Create a function to run an RI-SCALE model on a data file."""
 
     @schema_function
     async def run_model(
         model_id: str = Field(..., description="ID of the RI-SCALE model"),
-        file_path: str = Field(
+        input_file_url: str = Field(
             ...,
-            description="File path for input data file, e.g. 'test_input_0.npy'",
+            description="A file URL for input data file, e.g. 'test_input_0.npy'",
         ),
     ) -> dict[str, Any]:
-        """Run an RI-SCALE model on a dataset and return the results."""
-        dataset_file = await artifact_manager.get_file(
-            artifact_id=model_id,
-            file_path=file_path,
-        )
+        """Run an RI-SCALE model on a data file from URL and return the results."""
+        model_alias = model_id.split("/")[1] if "/" in model_id else model_id
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(input_file_url)
+            response.raise_for_status()
+            dataset_file = np.load(BytesIO(response.content))
 
         output = await model_runner.infer(
-            model_id=model_id,
+            model_id=model_alias,
             inputs=dataset_file,
         )
 
@@ -174,36 +215,6 @@ def make_run_model(
     return run_model
 
 
-async def test_workflow(
-    artifact_manager: RemoteService,
-    model_runner: RemoteService,
-) -> None:
-    search_models = make_search_models(artifact_manager)
-    search_datasets = make_search_datasets(artifact_manager)
-    run_model = make_run_model(artifact_manager, model_runner)
-
-    datasets = await search_datasets(keywords=["nuclei"], items_per_page=2, page_num=1)
-    dataset = datasets[0]
-    print("\n=========Selected dataset========\n")
-    print(dataset)
-
-    models = await search_models(keywords=["nuclei"], items_per_page=2, page_num=1)
-    model = models[0]
-    print("\n=========Selected model=========\n")
-    print(model)
-
-    print("\n=========RUNNING...=========\n")
-    code_run = """await model_runner.infer(
-    model_id="affable-shark",
-    inputs=file("test_input_0.npy"),
-)"""
-    print(code_run)
-
-    print("\n=========Model run result========\n")
-    result = await run_model(model_id=model["id"], file_path=dataset["files"][0])
-    print(result)
-
-
 async def register_service(
     server: RemoteService,
     service_id: str = "bioimage_runner",
@@ -214,7 +225,7 @@ async def register_service(
 
     search_models = make_search_models(artifact_manager)
     search_datasets = make_search_datasets(artifact_manager)
-    run_model = make_run_model(artifact_manager, model_runner)
+    run_model = make_run_model(model_runner)
 
     description = (
         "Service to search and run AI models from the RI-SCALE Model Hub."
