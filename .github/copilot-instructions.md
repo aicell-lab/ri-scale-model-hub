@@ -6,5 +6,4 @@ If the user asks for a bioimaging task, then run this workflow using the "BioIma
 3. Using `search_models`, search for models using the tags found in the dataset. Recommendation: start by using mode "OR" with many keywords. If the results are not relevant, try mode "AND" or fewer keywords.
 4. Decide which model is best suited for the user's task. It's likely that the model name and description will be similar to the dataset name and description.
 5. Using `run_model`, run the model with a file from the dataset.
-
-IMPORTANT: at the end of any model run, display both the input and output images visually, along with a summary of the workflow executed and results gotten.
+6. IMPORTANT: Use code interpreter to display both "input_image" and "output_image" of the return dict of `run_model` visually using matplotlib.imshow. Afterward, include a summary of the workflow executed and results gotten.

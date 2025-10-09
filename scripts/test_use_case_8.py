@@ -1,10 +1,13 @@
 import asyncio
 import os
+import sys
+from pathlib import Path
 
 from hypha_rpc import connect_to_server, login
 from hypha_rpc.rpc import RemoteService
 
-from .use_case_8 import make_run_model, make_search_datasets, make_search_models
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.use_case_8 import make_run_model, make_search_datasets, make_search_models
 
 
 async def test_workflow(server: RemoteService) -> None:
@@ -46,7 +49,6 @@ async def main() -> None:
         token = await login({"server_url": server_url})
 
     async with connect_to_server({"server_url": server_url, "token": token}) as server:
-        await login(server)
         await test_workflow(server)  # type: ignore
 
 
